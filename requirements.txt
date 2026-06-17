@@ -1,2 +1,4 @@
 python-telegram-bot==20.3
+gspread==6.0.0
+google-auth==2.27.0
 httpx==0.24.1
