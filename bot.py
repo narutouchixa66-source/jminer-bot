@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SHEET_ID = os.environ.get("SHEET_ID")
 ADMIN_ID = 7175060469
-GAME_URL = "https://strong-lokum-1e6127.netlify.app/"
+GAME_URL = "https://gleaming-rugelach-e33a2d.netlify.app/"
 
 # Google Sheets подключение
 def get_sheet():
