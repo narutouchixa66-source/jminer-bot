@@ -243,6 +243,8 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("👥 Все игроки", callback_data="admin_users")],
         [InlineKeyboardButton("🚫 Забанить", callback_data="admin_ban")],
         [InlineKeyboardButton("✅ Разбанить", callback_data="admin_unban")],
+        [InlineKeyboardButton("💰 Заявки на вывод", callback_data="admin_withdrawals")],
+        [InlineKeyboardButton("🎁 Начислить монеты", callback_data="admin_addcoins")],
         [InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast")],
     ]
     await update.message.reply_text("👑 Админ панель:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -265,6 +267,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("✅ Напиши:\n/unban ID_игрока")
     elif query.data == "admin_broadcast":
         await query.edit_message_text("📢 Напиши:\n/broadcast Текст сообщения")
+
+    elif query.data == "admin_withdrawals":
+        docs = db.collection('withdrawals').where('status', '==', 'pending').stream()
+        text = "💰 Заявки на вывод (в ожидании):\n\n"
+        count = 0
+        for d in docs:
+            w = d.to_dict()
+            text += (f"🆔 {d.id}\n👤 {w.get('first_name','')} (@{w.get('username','')}) | ID: {w.get('user_id')}\n"
+                     f"💰 {w.get('amount')} | Тип: {w.get('type')}\n🕐 {w.get('created_at')}\n"
+                     f"Закрыть: /paid {d.id}\n\n")
+            count += 1
+        if count == 0:
+            text = "✅ Нет заявок в ожидании."
+        await query.edit_message_text(text)
+
+    elif query.data == "admin_addcoins":
+        await query.edit_message_text(
+            "🎁 Начислить игроку (для теста/бонуса):\n"
+            "/setfield ID поле значение\n\n"
+            "Пример:\n/setfield 123456789 ton 1.5"
+        )
 
 async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
