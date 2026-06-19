@@ -135,6 +135,75 @@ def api_save_state():
     get_balance_doc(uid).set(state, merge=True)
     return jsonify({'ok': True})
 
+ADMIN_NOTIFY_IDS = ['7175060469', '6172801473']
+
+def notify_admins(text):
+    import requests as pyrequests
+    for chat_id in ADMIN_NOTIFY_IDS:
+        try:
+            pyrequests.post(
+                f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage',
+                json={'chat_id': chat_id, 'text': text, 'parse_mode': 'HTML'},
+                timeout=10
+            )
+        except Exception as e:
+            logging.warning(f"notify_admins failed for {chat_id}: {e}")
+
+@flask_app.route('/api/withdraw', methods=['POST'])
+def api_withdraw():
+    body = request.get_json(force=True, silent=True) or {}
+    init_data = body.get('initData', '')
+    parsed = verify_init_data(init_data)
+    if not parsed:
+        return jsonify({'error': 'invalid_auth'}), 403
+    user = get_user_from_init(parsed)
+    uid = str(user['id'])
+    if is_banned(uid):
+        return jsonify({'error': 'banned'}), 403
+
+    wtype = body.get('type')
+    amount = body.get('amount')
+    details = body.get('details', {})
+    if wtype not in ('ton', 'card', 'phone') or not amount:
+        return jsonify({'error': 'bad_request'}), 400
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    username = user.get('username', '')
+    first_name = user.get('first_name', '')
+
+    # Сохраняем заявку в Firestore — навсегда, ничего не потеряется
+    doc_ref = db.collection('withdrawals').document()
+    doc_ref.set({
+        'user_id': uid,
+        'username': username,
+        'first_name': first_name,
+        'type': wtype,
+        'amount': amount,
+        'details': details,
+        'status': 'pending',
+        'created_at': now
+    })
+
+    if wtype == 'ton':
+        text = (f"💎 <b>ЗАЯВКА НА ВЫВОД TON</b>\n"
+                f"🆔 ID заявки: {doc_ref.id}\n"
+                f"👤 ID: {uid}\n📛 Username: @{username}\n"
+                f"💰 Сумма: {amount} TON\n🏦 Кошелёк: {details.get('addr','')}\n🕐 {now}")
+    elif wtype == 'card':
+        text = (f"💳 <b>ЗАЯВКА НА ВЫВОД (КАРТА)</b>\n"
+                f"🆔 ID заявки: {doc_ref.id}\n"
+                f"👤 ID: {uid}\n📛 Username: @{username}\n"
+                f"💰 Сумма: {amount}$\n💳 Карта: {details.get('card','')}\n"
+                f"👤 Имя: {details.get('name','')}\n🕐 {now}")
+    else:
+        text = (f"📱 <b>ЗАЯВКА НА ВЫВОД (ТЕЛЕФОН)</b>\n"
+                f"🆔 ID заявки: {doc_ref.id}\n"
+                f"👤 ID: {uid}\n📛 Username: @{username}\n"
+                f"💰 Сумма: {amount} TON\n📞 Телефон: {details.get('phone','')}\n🕐 {now}")
+
+    notify_admins(text)
+    return jsonify({'ok': True, 'id': doc_ref.id})
+
 @flask_app.route('/')
 def home():
     return "JMiner backend is running."
@@ -257,6 +326,34 @@ async def setfield(update: Update, context: ContextTypes.DEFAULT_TYPE):
     get_balance_doc(uid).set({field: value_parsed}, merge=True)
     await update.message.reply_text(f"✅ Игроку {uid} установлено {field} = {value_parsed}")
 
+async def withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает все заявки на вывод (ожидающие). /withdrawals"""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    docs = db.collection('withdrawals').where('status', '==', 'pending').stream()
+    text = "💰 Заявки на вывод (в ожидании):\n\n"
+    count = 0
+    for d in docs:
+        w = d.to_dict()
+        text += (f"🆔 {d.id}\n👤 {w.get('first_name','')} (@{w.get('username','')}) | ID: {w.get('user_id')}\n"
+                 f"💰 {w.get('amount')} | Тип: {w.get('type')}\n🕐 {w.get('created_at')}\n"
+                 f"Закрыть: /paid {d.id}\n\n")
+        count += 1
+    if count == 0:
+        text = "✅ Нет заявок в ожидании."
+    await update.message.reply_text(text)
+
+async def paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмечает заявку как выполненную. /paid ID_заявки"""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Напиши: /paid ID_заявки")
+        return
+    wid = context.args[0]
+    db.collection('withdrawals').document(wid).set({'status': 'paid'}, merge=True)
+    await update.message.reply_text(f"✅ Заявка {wid} отмечена как выполненная.")
+
 # ---------------- RUN ----------------
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -272,6 +369,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("unban", unban))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("setfield", setfield))
+    app.add_handler(CommandHandler("withdrawals", withdrawals))
+    app.add_handler(CommandHandler("paid", paid))
     app.add_handler(CallbackQueryHandler(button_handler))
     print("Бот и сервер запущены...")
     app.run_polling()
