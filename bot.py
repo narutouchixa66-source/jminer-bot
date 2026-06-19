@@ -25,7 +25,7 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SHEET_ID = os.environ.get("SHEET_ID")
 ADMIN_ID = 7175060469
-GAME_URL = "https://strong-lokum-1e6127.netlify.app/"
+GAME_URL = "https://gleaming-rugelach-e33a2d.netlify.app/"
 BOT_USERNAME = "ProjectNBot"
 
 # ---------------- FIREBASE INIT ----------------
@@ -208,6 +208,32 @@ def api_withdraw():
 def home():
     return "JMiner backend is running."
 
+@flask_app.route('/api/bonuses', methods=['GET'])
+def api_get_bonuses():
+    init_data = request.args.get('initData', '')
+    parsed = verify_init_data(init_data)
+    if not parsed:
+        return jsonify({'error': 'invalid_auth'}), 403
+    user = get_user_from_init(parsed)
+    uid = str(user['id'])
+    docs = db.collection('balances').document(uid).collection('bonuses').where('applied', '==', False).stream()
+    bonuses = [{'id': d.id, 'field': d.to_dict().get('field'), 'amount': d.to_dict().get('amount')} for d in docs]
+    return jsonify({'bonuses': bonuses})
+
+@flask_app.route('/api/bonuses/ack', methods=['POST'])
+def api_ack_bonuses():
+    body = request.get_json(force=True, silent=True) or {}
+    init_data = body.get('initData', '')
+    parsed = verify_init_data(init_data)
+    if not parsed:
+        return jsonify({'error': 'invalid_auth'}), 403
+    user = get_user_from_init(parsed)
+    uid = str(user['id'])
+    ids = body.get('ids', [])
+    for bid in ids:
+        db.collection('balances').document(uid).collection('bonuses').document(bid).set({'applied': True}, merge=True)
+    return jsonify({'ok': True})
+
 # ---------------- TELEGRAM BOT HANDLERS ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -284,9 +310,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "admin_addcoins":
         await query.edit_message_text(
-            "🎁 Начислить игроку (для теста/бонуса):\n"
+            "🎁 Начислить игроку:\n"
             "/setfield ID поле значение\n\n"
-            "Пример:\n/setfield 123456789 ton 1.5"
+            "Пример:\n/setfield 123456789 ton 1.5\n\n"
+            "(применится автоматически, в течение 15 сек пока игрок онлайн)"
         )
 
 async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -334,7 +361,8 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"📢 Отправлено {sent} игрокам!")
 
 async def setfield(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Админ-команда для теста: /setfield ID поле значение
+    """Админ-команда: начисляет игроку бонус, который применится безопасно (не теряется).
+    /setfield ID поле значение
     Пример: /setfield 123456789 ton 1.5"""
     if update.effective_user.id != ADMIN_ID:
         return
@@ -346,8 +374,14 @@ async def setfield(update: Update, context: ContextTypes.DEFAULT_TYPE):
         value_parsed = float(value) if '.' in value else int(value)
     except ValueError:
         value_parsed = value
-    get_balance_doc(uid).set({field: value_parsed}, merge=True)
-    await update.message.reply_text(f"✅ Игроку {uid} установлено {field} = {value_parsed}")
+    # Кладём в очередь бонусов — игра сама заберёт и применит при следующей проверке (раз в 15 сек)
+    db.collection('balances').document(uid).collection('bonuses').document().set({
+        'field': field,
+        'amount': value_parsed,
+        'applied': False,
+        'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
+    await update.message.reply_text(f"✅ Игроку {uid} поставлено в очередь: {field} +{value_parsed}\n(применится автоматически когда игрок в сети, в течение 15 сек)")
 
 async def withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает все заявки на вывод (ожидающие). /withdrawals"""
