@@ -287,8 +287,8 @@ def api_promo():
     field = promo.get('field', 'pCoins')
     amount = promo.get('amount', 0)
 
-    # Начисляем через очередь бонусов — так же надёжно, как у /setfield
-    add_bonus_to_user(uid, field, amount)
+    # Награда применяется мгновенно на клиенте (см. index.html) и синхронизируется
+    # через /api/state. В очередь bonuses не кладём, чтобы не начислить дважды.
 
     promo_ref.update({
         'used_by': firestore.ArrayUnion([uid]),
