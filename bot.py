@@ -502,6 +502,17 @@ async def addpromo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     code, field, amount_raw, limit_raw = context.args[0], context.args[1], context.args[2], context.args[3]
+
+    VALID_FIELDS = ('pCoins', 'jCoins', 'ton')
+    if field not in VALID_FIELDS:
+        await update.message.reply_text(
+            f"❌ Неверное название поля: '{field}'\n\n"
+            f"Допустимые поля (пиши ТОЧНО так, с учётом регистра):\n"
+            f"• pCoins\n• jCoins\n• ton\n\n"
+            f"Пример: /addpromo {code} pCoins 1000 50"
+        )
+        return
+
     try:
         amount = float(amount_raw) if '.' in amount_raw else int(amount_raw)
     except ValueError:
