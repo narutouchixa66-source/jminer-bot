@@ -98,6 +98,20 @@ def get_user_from_init(parsed):
 def get_balance_doc(user_id):
     return db.collection('balances').document(str(user_id))
 
+# ---------------- PROMOCODES HELPERS ----------------
+def get_promo_doc(code):
+    # Промокоды всегда храним в верхнем регистре, чтобы "abc" и "ABC" были одним кодом
+    return db.collection('promocodes').document(code.strip().upper())
+
+def add_bonus_to_user(uid, field, amount):
+    """Кладёт бонус в очередь — игра сама забирает его (как и /setfield)."""
+    db.collection('balances').document(str(uid)).collection('bonuses').document().set({
+        'field': field,
+        'amount': amount,
+        'applied': False,
+        'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
+
 # ---------------- FLASK API (для игры) ----------------
 flask_app = Flask(__name__)
 CORS(flask_app)
@@ -234,6 +248,55 @@ def api_ack_bonuses():
         db.collection('balances').document(uid).collection('bonuses').document(bid).set({'applied': True}, merge=True)
     return jsonify({'ok': True})
 
+# ---------------- PROMOCODE API (для игры) ----------------
+@flask_app.route('/api/promo', methods=['POST'])
+def api_promo():
+    body = request.get_json(force=True, silent=True) or {}
+    init_data = body.get('initData', '')
+    parsed = verify_init_data(init_data)
+    if not parsed:
+        return jsonify({'error': 'invalid_auth'}), 403
+    user = get_user_from_init(parsed)
+    uid = str(user['id'])
+    if is_banned(uid):
+        return jsonify({'error': 'banned'}), 403
+
+    code = (body.get('code') or '').strip()
+    if not code:
+        return jsonify({'error': 'empty_code'}), 400
+
+    promo_ref = get_promo_doc(code)
+    promo_doc = promo_ref.get()
+    if not promo_doc.exists:
+        return jsonify({'error': 'not_found'}), 404
+
+    promo = promo_doc.to_dict()
+
+    if not promo.get('active', True):
+        return jsonify({'error': 'inactive'}), 400
+
+    used_by = promo.get('used_by', [])
+    if uid in used_by:
+        return jsonify({'error': 'already_used'}), 400
+
+    limit = promo.get('limit', 0)  # 0 = безлимит
+    used_count = promo.get('used_count', 0)
+    if limit and used_count >= limit:
+        return jsonify({'error': 'limit_reached'}), 400
+
+    field = promo.get('field', 'pCoins')
+    amount = promo.get('amount', 0)
+
+    # Начисляем через очередь бонусов — так же надёжно, как у /setfield
+    add_bonus_to_user(uid, field, amount)
+
+    promo_ref.update({
+        'used_by': firestore.ArrayUnion([uid]),
+        'used_count': firestore.Increment(1)
+    })
+
+    return jsonify({'ok': True, 'field': field, 'amount': amount})
+
 # ---------------- TELEGRAM BOT HANDLERS ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -271,6 +334,7 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("✅ Разбанить", callback_data="admin_unban")],
         [InlineKeyboardButton("💰 Заявки на вывод", callback_data="admin_withdrawals")],
         [InlineKeyboardButton("🎁 Начислить монеты", callback_data="admin_addcoins")],
+        [InlineKeyboardButton("🎫 Промокоды", callback_data="admin_promo")],
         [InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast")],
     ]
     await update.message.reply_text("👑 Админ панель:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -314,6 +378,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/setfield ID поле значение\n\n"
             "Пример:\n/setfield 123456789 ton 1.5\n\n"
             "(применится автоматически, в течение 15 сек пока игрок онлайн)"
+        )
+
+    elif query.data == "admin_promo":
+        await query.edit_message_text(
+            "🎫 <b>Управление промокодами</b>\n\n"
+            "Создать код:\n"
+            "<code>/addpromo КОД ПОЛЕ СУММА ЛИМИТ</code>\n\n"
+            "Пример (даёт 1000 P-Coins, можно использовать 50 раз):\n"
+            "<code>/addpromo NEWYEAR pCoins 1000 50</code>\n\n"
+            "Поля: pCoins, jCoins, ton\n"
+            "ЛИМИТ = 0 значит без ограничения по количеству активаций\n\n"
+            "Посмотреть все коды:\n<code>/promocodes</code>\n\n"
+            "Выключить код:\n<code>/delpromo КОД</code>",
+            parse_mode="HTML"
         )
 
 async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -375,12 +453,7 @@ async def setfield(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         value_parsed = value
     # Кладём в очередь бонусов — игра сама заберёт и применит при следующей проверке (раз в 15 сек)
-    db.collection('balances').document(uid).collection('bonuses').document().set({
-        'field': field,
-        'amount': value_parsed,
-        'applied': False,
-        'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    })
+    add_bonus_to_user(uid, field, value_parsed)
     await update.message.reply_text(f"✅ Игроку {uid} поставлено в очередь: {field} +{value_parsed}\n(применится автоматически когда игрок в сети, в течение 15 сек)")
 
 async def withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -411,6 +484,84 @@ async def paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.collection('withdrawals').document(wid).set({'status': 'paid'}, merge=True)
     await update.message.reply_text(f"✅ Заявка {wid} отмечена как выполненная.")
 
+async def addpromo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Создаёт новый промокод.
+    /addpromo КОД ПОЛЕ СУММА ЛИМИТ
+    Пример: /addpromo NEWYEAR pCoins 1000 50  (лимит 0 = без ограничения)"""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if len(context.args) < 4:
+        await update.message.reply_text(
+            "Напиши: /addpromo КОД ПОЛЕ СУММА ЛИМИТ\n"
+            "Пример: /addpromo NEWYEAR pCoins 1000 50\n"
+            "(ЛИМИТ = 0 значит без ограничения)"
+        )
+        return
+    code, field, amount_raw, limit_raw = context.args[0], context.args[1], context.args[2], context.args[3]
+    try:
+        amount = float(amount_raw) if '.' in amount_raw else int(amount_raw)
+    except ValueError:
+        await update.message.reply_text("❌ СУММА должна быть числом.")
+        return
+    try:
+        limit = int(limit_raw)
+    except ValueError:
+        await update.message.reply_text("❌ ЛИМИТ должен быть целым числом (0 = без ограничения).")
+        return
+
+    get_promo_doc(code).set({
+        'code': code.strip().upper(),
+        'field': field,
+        'amount': amount,
+        'limit': limit,
+        'used_count': 0,
+        'used_by': [],
+        'active': True,
+        'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
+    limit_text = "без ограничения" if limit == 0 else f"{limit} раз"
+    await update.message.reply_text(
+        f"✅ Промокод создан!\n\n"
+        f"🎫 Код: {code.strip().upper()}\n"
+        f"🎁 Награда: {field} +{amount}\n"
+        f"🔢 Лимит активаций: {limit_text}"
+    )
+
+async def delpromo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выключает промокод (он перестаёт работать, но история сохраняется).
+    /delpromo КОД"""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Напиши: /delpromo КОД")
+        return
+    code = context.args[0]
+    promo_ref = get_promo_doc(code)
+    if not promo_ref.get().exists:
+        await update.message.reply_text("❌ Такой промокод не найден.")
+        return
+    promo_ref.update({'active': False})
+    await update.message.reply_text(f"🚫 Промокод {code.strip().upper()} выключен.")
+
+async def promocodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает все промокоды. /promocodes"""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    docs = db.collection('promocodes').stream()
+    text = "🎫 <b>Промокоды:</b>\n\n"
+    count = 0
+    for d in docs:
+        p = d.to_dict()
+        status = "✅" if p.get('active', True) else "🚫"
+        limit = p.get('limit', 0)
+        limit_text = "∞" if limit == 0 else f"{p.get('used_count', 0)}/{limit}"
+        text += (f"{status} <code>{d.id}</code> — {p.get('field')} +{p.get('amount')} "
+                 f"(использован: {limit_text})\n")
+        count += 1
+    if count == 0:
+        text = "📭 Промокодов пока нет."
+    await update.message.reply_text(text, parse_mode="HTML")
+
 # ---------------- RUN ----------------
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -428,6 +579,9 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("setfield", setfield))
     app.add_handler(CommandHandler("withdrawals", withdrawals))
     app.add_handler(CommandHandler("paid", paid))
+    app.add_handler(CommandHandler("addpromo", addpromo))
+    app.add_handler(CommandHandler("delpromo", delpromo))
+    app.add_handler(CommandHandler("promocodes", promocodes))
     app.add_handler(CallbackQueryHandler(button_handler))
     print("Бот и сервер запущены...")
     app.run_polling()
