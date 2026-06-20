@@ -285,7 +285,11 @@ def api_promo():
         return jsonify({'error': 'limit_reached'}), 400
 
     field = promo.get('field', 'pCoins')
-    amount = promo.get('amount', 0)
+    amount_raw = promo.get('amount', 0)
+    try:
+        amount = float(amount_raw) if isinstance(amount_raw, str) and '.' in amount_raw else (int(amount_raw) if isinstance(amount_raw, str) else amount_raw)
+    except (ValueError, TypeError):
+        amount = 0
 
     # Награда применяется мгновенно на клиенте (см. index.html) и синхронизируется
     # через /api/state. В очередь bonuses не кладём, чтобы не начислить дважды.
@@ -585,4 +589,3 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(button_handler))
     print("Бот и сервер запущены...")
     app.run_polling()
-    
